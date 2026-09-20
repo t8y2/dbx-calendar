@@ -104,3 +104,7 @@ dbx-plugin.toml      packaging and dev commands
 Svelte 5 (runes) and Vite 7. The UI talks to the host through the `window.dbxPlugin` bridge.
 
 See the [DBX plugin development guide](https://dbxio.com/en/docs/plugin-development) for the manifest format, Host API and packaging.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

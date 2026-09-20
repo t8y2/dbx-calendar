@@ -104,3 +104,7 @@ dbx-plugin.toml      打包与开发命令配置
 Svelte 5（runes）+ Vite 7。UI 通过 `window.dbxPlugin` 桥接与宿主通信。
 
 清单字段、Host API、打包流程等详见 [DBX 插件开发文档](https://dbxio.com/en/docs/plugin-development)。
+
+## 许可证
+
+Apache-2.0，详见 [LICENSE](LICENSE)。
