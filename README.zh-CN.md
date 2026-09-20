@@ -1,6 +1,6 @@
-<img src="assets/icon.svg" width="96" alt="日历清单图标">
+<img src="assets/icon.svg" width="96" alt="日历笔记图标">
 
-# 日历清单
+# 日历笔记
 
 [DBX](https://dbxio.com) 的月视图日历。每一天都带农历、节气或节假日安排，双击任意格子即可记录备忘。
 
