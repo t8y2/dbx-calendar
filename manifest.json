@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/t8y2/dbx/plugin-sdk-v1/plugins/manifest.schema.json",
+  "manifest_version": 1,
+  "id": "com.tenltrs.dbx-calendar",
+  "name": "Calendar Notes",
+  "version": "0.1.0",
+  "publisher": "Tenltrs",
+  "description": "A minimal month-view calendar for keeping day-by-day notes.",
+  "icon": "assets/icon.svg",
+  "engines": { "dbx": ">=0.5.68", "host_api": "1" },
+  "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+  "contributions": [
+    {
+      "type": "workbench",
+      "id": "com.tenltrs.dbx-calendar.workbench",
+      "label": "Calendar Notes",
+      "description": "Jot notes on the days of a month grid.",
+      "icon": "assets/icon.svg"
+    }
+  ],
+  "localizations": {
+    "zh-CN": {
+      "name": "日历清单",
+      "description": "日历清单，快捷的备忘工具。",
+      "contributions": {
+        "com.tenltrs.dbx-calendar.workbench": {
+          "label": "日历清单",
+          "description": "在月视图日历上按天记录备忘。"
+        }
+      }
+    }
+  }
+}
