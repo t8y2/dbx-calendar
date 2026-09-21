@@ -1,0 +1,17 @@
+{
+  "name": "Calendar Notes",
+  "description": "A minimal month-view calendar for keeping day-by-day notes.",
+  "icon": "assets/icon.svg",
+  "tags": [
+    "calendar",
+    "memo",
+    "notes",
+    "workflow",
+    "to-do"
+  ],
+  "permissions": [],
+  "source": "https://github.com/tenltrs/dbx-calendar/tree/v0.1.3",
+  "homepage": "https://github.com/tenltrs/dbx-calendar/",
+  "license": "Apache-2.0",
+  "releaseNotes": "Build a minimalist calendar and reminder tool."
+}
