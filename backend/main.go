@@ -13,6 +13,7 @@ type plugin struct {
 	mutex       sync.RWMutex
 	connections map[string]*connNotes
 	notes       *notesStore
+	exports     *exportStore
 }
 
 // workbenchNamespace is the storage namespace used when the host addresses the
@@ -112,6 +113,24 @@ func (plugin *plugin) Handle(
 			return nil, dbxpluginsdk.NewError(-32603, err.Error())
 		}
 		return map[string]any{"success": true, "notes": all}, nil
+	case "dbx-calendar/export/write":
+		name, encoded, err := decodeExport(values)
+		if err != nil {
+			return nil, dbxpluginsdk.NewError(-32602, err.Error())
+		}
+		written, writeErr := plugin.exports.Write(name, encoded)
+		if writeErr != nil {
+			if errors.Is(writeErr, ErrExportTooLarge) {
+				return nil, dbxpluginsdk.NewError(-32602, writeErr.Error())
+			}
+			return nil, notesError(writeErr)
+		}
+		return map[string]any{
+			"success":   true,
+			"path":      written.Path,
+			"size":      written.Size,
+			"directory": written.Directory,
+		}, nil
 	default:
 		return nil, dbxpluginsdk.MethodNotFound(method)
 	}
@@ -212,6 +231,7 @@ func main() {
 	server := dbxpluginsdk.NewServer(metadata, &plugin{
 		connections: map[string]*connNotes{},
 		notes:       newNotesStore(dataDir),
+		exports:     newExportStore(dataDir),
 	})
 	if err := server.Serve(); err != nil {
 		log.Fatal(err)

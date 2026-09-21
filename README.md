@@ -31,6 +31,7 @@ Also available in [简体中文](README.zh-CN.md).
 **Export and import**
 
 - The toolbar menu exports notes as `.xls` or `.txt`, over all dates or a range, or on a custom range
+- A save picker is used when the host offers one; otherwise the sidecar writes the file and the toast reports the path
 - Import reads the first sheet of an `.xls` or `.xlsx` file, one date and note per row
 - The date column accepts text, a real date cell, or an Excel serial number
 - Rows whose first cell is not a date — the header and blanks — are skipped
@@ -72,6 +73,18 @@ The split follows the data: anything computed deterministically stays in the UI,
 The host sets `DBX_PLUGIN_DATA_DIR` on every sidecar. Notes live in `notes/<namespace>.json` under that directory, written atomically (temp file plus rename) so an interrupted write cannot corrupt the file. A file that fails to parse is renamed aside as `*.corrupt-<timestamp>` rather than deleted, because notes are not reproducible.
 
 The namespace is the connection id when the host addresses a connection, and the fixed string `workbench` otherwise. Without a data directory the sidecar still runs, but a note write is refused with an explicit error instead of a fake success, and the UI shows it.
+
+### Why the sidecar writes exports
+
+The host renders this UI in a sandboxed frame, and a frame without `allow-downloads` **silently drops** an anchor click on a blob URL: nothing throws, and no file arrives. The host bridge exposes no download or save method either.
+
+So exporting tries, in order:
+
+1. `showSaveFilePicker`, the one browser route that works without `allow-downloads` because the user names the file.
+2. The classic anchor download, which is what a plain browser tab uses.
+3. The sidecar, which writes `exports/<name>-<timestamp>.<ext>` under the data directory and reports the absolute path in the toast.
+
+Dismissing the save picker is treated as a decision, not a failure, so the file is not also written behind the user's back. A failed write is surfaced rather than reported as a successful export.
 
 ## Build and release
 

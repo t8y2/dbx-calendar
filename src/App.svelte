@@ -49,6 +49,8 @@
           .filter(Boolean)
           .join(", "),
       exportFailed: "Export failed",
+      savedTo: (path) => `Saved to ${path}`,
+      savedNoPath: "Saved, but the host did not report where",
       importFailed: "Could not read that file",
       saveFailed: "Could not save",
       fileExcel: "Excel sheet",
@@ -98,6 +100,8 @@
       imported: (count, total, skipped) =>
         [`已导入 ${count} 条`, `共 ${total} 条`, skipped ? `跳过 ${skipped} 行` : null].filter(Boolean).join("，"),
       exportFailed: "导出失败",
+      savedTo: (path) => `已保存到 ${path}`,
+      savedNoPath: "已保存，但宿主未回报路径",
       importFailed: "无法读取该文件",
       saveFailed: "保存失败",
       fileExcel: "Excel 表格",
@@ -281,6 +285,11 @@
     notes = result.value?.notes ?? {};
   }
 
+  /** A `data:` URI is not a thing the user can open, so only a real path is shown. */
+  function displayPath(path) {
+    return typeof path === "string" && !path.startsWith("data:") ? path : "";
+  }
+
   function flash(message) {
     status = message;
     clearTimeout(statusTimer);
@@ -380,40 +389,106 @@
       .map((key) => [key, notes[key]]);
   });
 
-  function saveBlob(blob, filename) {
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = filename;
-    link.click();
-    // Revoking straight away can cancel the download before it starts.
-    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  /**
+   * Hands the file to the user.
+   *
+   * The host renders this UI in a sandboxed frame, so a plain anchor download is
+   * silently dropped: the click does not throw, but no file arrives. The chain
+   * below therefore tries the browser route first and falls back to the sidecar,
+   * which is an ordinary process and can always write the file.
+   */
+  async function saveExport(blob, filename) {
+    if (await saveViaBrowser(blob, filename)) return true;
+    return saveViaSidecar(blob, filename);
   }
 
-  function runExport() {
+  async function saveViaBrowser(blob, filename) {
+    // A save picker is the only browser download that works without the frame's
+    // allow-downloads flag, because the user names the file themselves.
+    if (typeof window.showSaveFilePicker === "function") {
+      try {
+        const handle = await window.showSaveFilePicker({ suggestedName: filename });
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        return true;
+      } catch (error) {
+        // Dismissing the picker is a decision, not a failure: stop here so the
+        // file is not also written to the data directory behind the user's back.
+        if (error?.name === "AbortError") return true;
+        console.warn("[calendar] save picker unavailable, falling back to the sidecar:", error);
+      }
+    }
+
+    // The classic anchor route still works in a normal browser tab, which is how
+    // the UI behaves when opened outside the host.
+    try {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.click();
+      // Revoking straight away can cancel the download before it starts.
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      return true;
+    } catch (error) {
+      console.warn("[calendar] anchor download unavailable, falling back to the sidecar:", error);
+      return false;
+    }
+  }
+
+  async function saveViaSidecar(blob, filename) {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    // Chunked so a large workbook cannot blow the argument limit of from().
+    let binary = "";
+    for (let index = 0; index < bytes.length; index += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+    }
+
+    const result = await invoke("dbx-calendar/export/write", {
+      name: filename,
+      data: btoa(binary),
+    });
+    if (!result.ok) {
+      notesError = result.error;
+      flash(`${text.exportFailed}: ${result.error}`);
+      return false;
+    }
+
+    notesError = "";
+    const saved = displayPath(result.value?.path);
+    flash(saved ? text.savedTo(saved) : text.savedNoPath);
+    return true;
+  }
+
+  async function runExport() {
     const rows = exportRows;
     if (!rows.length) return;
 
     try {
-      const filename = `calendar-notes-${todayKey}`;
+      const stem = `calendar-notes-${todayKey}`;
+      let blob;
+      let filename;
       if (exportType === "txt") {
-        const text = rows.map(([key, content]) => `${key}\t${content}`).join("\n");
-        saveBlob(new Blob([`${text}\n`], { type: "text/plain;charset=utf-8" }), `${filename}.txt`);
+        // Named `body` rather than `text`: `text` is the copy table.
+        const body = rows.map(([key, content]) => `${key}\t${content}`).join("\n");
+        blob = new Blob([`${body}\n`], { type: "text/plain;charset=utf-8" });
+        filename = `${stem}.txt`;
       } else {
         const sheet = XLSX.utils.aoa_to_sheet([[text.colDate, text.colContent], ...rows]);
         sheet["!cols"] = [{ wch: 12 }, { wch: 60 }];
         const book = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(book, sheet, text.sheetName);
-        saveBlob(
-          new Blob([XLSX.write(book, { bookType: "xls", type: "array" })], {
-            type: "application/vnd.ms-excel",
-          }),
-          `${filename}.xls`,
-        );
+        blob = new Blob([XLSX.write(book, { bookType: "xls", type: "array" })], {
+          type: "application/vnd.ms-excel",
+        });
+        filename = `${stem}.xls`;
       }
 
-      exportOpen = false;
-      flash(text.exported(rows.length));
+      if (await saveExport(blob, filename)) {
+        exportOpen = false;
+        flash(text.exported(rows.length));
+      }
     } catch (error) {
       flash(`${text.exportFailed}: ${error.message}`);
     }
@@ -756,7 +831,15 @@
       </div>
 
       <div class="dialog-actions">
-        <span class="count">{exportRows.length ? text.entries(exportRows.length) : text.nothingInRange}</span>
+        <span class="count">
+          {#if exportRows.length}
+            {text.entries(exportRows.length)}
+          {:else if notesError}
+            {text.nothingInRange} — {text.saveFailed}: {notesError}
+          {:else}
+            {text.nothingInRange}
+          {/if}
+        </span>
         <button type="button" class="ghost" onclick={() => (exportOpen = false)}>{text.cancel}</button>
         <button type="button" class="primary" disabled={!exportRows.length} onclick={runExport}>
           {text.export}

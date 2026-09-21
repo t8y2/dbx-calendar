@@ -9,6 +9,7 @@
   "icon": "assets/icon.svg",
   "source": "https://github.com/tenltrs/dbx-calendar/tree/v0.1.5",
   "homepage": "https://github.com/tenltrs/dbx-calendar/",
+  "permissions": [],
   "engines": { "dbx": ">=0.6.0", "host_api": "1" },
   "entrypoints": {
     "backend": { "executable": "bin/dbx-plugin-dbx-calendar" },

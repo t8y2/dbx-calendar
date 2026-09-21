@@ -183,6 +183,7 @@ func TestNotesMethodsFailWithoutDataDir(t *testing.T) {
 	instance := &plugin{
 		connections: map[string]*connNotes{},
 		notes:       newNotesStore(""),
+		exports:     newExportStore(""),
 	}
 	params, _ := json.Marshal(map[string]any{"connection": map[string]any{"id": "conn-1"}, "date": "2026-02-14", "value": "dinner"})
 	result, pluginError := instance.Handle(dbxpluginsdk.RequestContext{}, "dbx-calendar/notes/set", params, nil)

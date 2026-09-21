@@ -69,6 +69,7 @@ func TestProtocolWorkbenchFlow(t *testing.T) {
 	instance := &plugin{
 		connections: map[string]*connNotes{},
 		notes:       newNotesStore(dir),
+		exports:     newExportStore(dir),
 	}
 
 	responses := serve(t, instance,
@@ -112,6 +113,7 @@ func TestProtocolWorkbenchFlow(t *testing.T) {
 	restarted := &plugin{
 		connections: map[string]*connNotes{},
 		notes:       newNotesStore(dir),
+		exports:     newExportStore(dir),
 	}
 	responses = serve(t, restarted, requestLine(1, "dbx-calendar/notes/list", map[string]any{}))
 	reloaded := responses[1]["result"].(map[string]any)
@@ -127,6 +129,7 @@ func TestProtocolReplaceNotes(t *testing.T) {
 	instance := &plugin{
 		connections: map[string]*connNotes{},
 		notes:       newNotesStore(dir),
+		exports:     newExportStore(dir),
 	}
 
 	serve(t, instance,
