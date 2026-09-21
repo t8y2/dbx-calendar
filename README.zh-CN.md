@@ -35,7 +35,7 @@
 
 ## 环境要求
 
-- DBX `>=0.5.68`，Host API `1`
+- DBX `>=0.6.0`，Host API `1`
 - 开发需要 Node.js 与 `dbx-plugin` CLI
 
 ## 开发

@@ -35,7 +35,7 @@ Also available in [简体中文](README.zh-CN.md).
 
 ## Requirements
 
-- DBX `>=0.5.68`, host API `1`
+- DBX `>=0.6.0`, host API `1`
 - Node.js and the `dbx-plugin` CLI for development
 
 ## Develop
