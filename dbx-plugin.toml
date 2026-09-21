@@ -7,3 +7,4 @@ binary = "dbx-plugin-dbx-calendar"
 
 [package]
 include = ["assets", "ui"]
+
