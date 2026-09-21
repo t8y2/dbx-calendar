@@ -392,36 +392,46 @@
   /**
    * Hands the file to the user.
    *
-   * The host renders this UI in a sandboxed frame, so a plain anchor download is
-   * silently dropped: the click does not throw, but no file arrives. The chain
-   * below therefore tries the browser route first and falls back to the sidecar,
-   * which is an ordinary process and can always write the file.
+   * A browser download cannot be detected from inside the page: in a sandboxed
+   * frame without allow-downloads the anchor click neither throws nor delivers a
+   * file, so "try the browser, fall back on error" always believes it succeeded.
+   * The verifiable write therefore comes first — the sidecar is an ordinary
+   * process, and its reply either names a real path or fails — and the browser
+   * download becomes best effort on top of it.
    */
   async function saveExport(blob, filename) {
-    if (await saveViaBrowser(blob, filename)) return true;
-    return saveViaSidecar(blob, filename);
-  }
+    const stored = await saveViaSidecar(blob, filename);
+    // Without a sidecar there is nothing to fall back to: a plain browser tab
+    // relies on the anchor, and there it works.
+    if (!stored.ok) {
+      anchorDownload(blob, filename);
+      return false;
+    }
 
-  async function saveViaBrowser(blob, filename) {
-    // A save picker is the only browser download that works without the frame's
-    // allow-downloads flag, because the user names the file themselves.
+    // A save picker lets the user choose a location, which beats a path inside the
+    // data directory, but it is best effort: the file is already stored.
     if (typeof window.showSaveFilePicker === "function") {
       try {
         const handle = await window.showSaveFilePicker({ suggestedName: filename });
         const writable = await handle.createWritable();
         await writable.write(blob);
         await writable.close();
+        flash(text.exported(exportRows.length));
         return true;
       } catch (error) {
-        // Dismissing the picker is a decision, not a failure: stop here so the
-        // file is not also written to the data directory behind the user's back.
-        if (error?.name === "AbortError") return true;
-        console.warn("[calendar] save picker unavailable, falling back to the sidecar:", error);
+        if (error?.name !== "AbortError") {
+          console.warn("[calendar] save picker failed; the stored copy stands:", error);
+        }
+        // Cancelling is a decision: keep reporting where the file already is.
       }
     }
 
-    // The classic anchor route still works in a normal browser tab, which is how
-    // the UI behaves when opened outside the host.
+    flash(stored.path ? text.savedTo(stored.path) : text.savedNoPath);
+    return true;
+  }
+
+  /** The classic route, used when there is no sidecar to write for us. */
+  function anchorDownload(blob, filename) {
     try {
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -430,13 +440,16 @@
       link.click();
       // Revoking straight away can cancel the download before it starts.
       setTimeout(() => URL.revokeObjectURL(url), 10_000);
-      return true;
     } catch (error) {
-      console.warn("[calendar] anchor download unavailable, falling back to the sidecar:", error);
-      return false;
+      flash(`${text.exportFailed}: ${error.message}`);
     }
   }
 
+  /**
+   * Writes the file through sidecar and reports where it landed. The reply is
+   * the only evidence either side of this feature can trust, which is why it is
+   * attempted before any browser route.
+   */
   async function saveViaSidecar(blob, filename) {
     const bytes = new Uint8Array(await blob.arrayBuffer());
     // Chunked so a large workbook cannot blow the argument limit of from().
@@ -452,13 +465,11 @@
     if (!result.ok) {
       notesError = result.error;
       flash(`${text.exportFailed}: ${result.error}`);
-      return false;
+      return { ok: false, path: "" };
     }
 
     notesError = "";
-    const saved = displayPath(result.value?.path);
-    flash(saved ? text.savedTo(saved) : text.savedNoPath);
-    return true;
+    return { ok: true, path: displayPath(result.value?.path) };
   }
 
   async function runExport() {
