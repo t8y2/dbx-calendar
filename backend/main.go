@@ -95,6 +95,23 @@ func (plugin *plugin) Handle(
 			return nil, dbxpluginsdk.NewError(-32603, err.Error())
 		}
 		return map[string]any{"success": true, "date": dateKey, "notes": all}, nil
+	case "dbx-calendar/notes/replace":
+		notes, pluginError := plugin.notesFor(values)
+		if pluginError != nil {
+			return nil, pluginError
+		}
+		incoming, ok := decodeNoteMap(values["notes"])
+		if !ok {
+			return nil, dbxpluginsdk.NewError(-32602, "Notes must be an object of date to text")
+		}
+		if err := notes.Replace(incoming); err != nil {
+			return nil, notesError(err)
+		}
+		all, err := notes.Notes()
+		if err != nil {
+			return nil, dbxpluginsdk.NewError(-32603, err.Error())
+		}
+		return map[string]any{"success": true, "notes": all}, nil
 	default:
 		return nil, dbxpluginsdk.MethodNotFound(method)
 	}
@@ -143,6 +160,24 @@ func requestConnectionID(values map[string]any) (string, *dbxpluginsdk.PluginErr
 		return "", dbxpluginsdk.NewError(-32602, "Missing connection id")
 	}
 	return connectionID, nil
+}
+
+// decodeNoteMap reads the whole note set an import sends. Keys are validated by
+// the store, so this only has to reject a payload of the wrong shape.
+func decodeNoteMap(value any) (map[string]string, bool) {
+	raw, ok := value.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	notes := make(map[string]string, len(raw))
+	for key, entry := range raw {
+		text, ok := entry.(string)
+		if !ok {
+			return nil, false
+		}
+		notes[key] = text
+	}
+	return notes, true
 }
 
 // optionalConnectionID reads the connection the request targets, or "" when the

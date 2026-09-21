@@ -120,6 +120,62 @@ func TestProtocolWorkbenchFlow(t *testing.T) {
 	}
 }
 
+// An import replaces the whole set in one round trip, which is what the export
+// dialog's companion path relies on.
+func TestProtocolReplaceNotes(t *testing.T) {
+	dir := t.TempDir()
+	instance := &plugin{
+		connections: map[string]*connNotes{},
+		notes:       newNotesStore(dir),
+	}
+
+	serve(t, instance,
+		requestLine(1, "dbx-calendar/notes/set", map[string]any{"date": "2026-01-01", "value": "old"}),
+	)
+
+	responses := serve(t, instance, requestLine(1, "dbx-calendar/notes/replace", map[string]any{
+		"notes": map[string]any{
+			"2026-02-14": "dinner",
+			"2026-02-15": "lunch",
+		},
+	}))
+	replaced := responses[1]["result"].(map[string]any)
+	if replaced["success"] != true {
+		t.Fatalf("unexpected replace result: %#v", replaced)
+	}
+	notes := replaced["notes"].(map[string]any)
+	if len(notes) != 2 || notes["2026-02-14"] != "dinner" {
+		t.Fatalf("expected the replaced set: %#v", notes)
+	}
+	// Replace is a replacement, not a merge: the pre-existing date is gone.
+	if _, present := notes["2026-01-01"]; present {
+		t.Fatalf("expected the old date to be dropped: %#v", notes)
+	}
+
+	// A payload of the wrong shape is rejected rather than half-applied.
+	responses = serve(t, instance, requestLine(1, "dbx-calendar/notes/replace", map[string]any{
+		"notes": map[string]any{"2026-02-14": 42},
+	}))
+	if responses[1]["error"] == nil {
+		t.Fatalf("expected a non-string note to be rejected: %#v", responses[1])
+	}
+}
+
+// A malformed date key in an import must be refused rather than written.
+func TestNotesReplaceRejectsBadDate(t *testing.T) {
+	store := newNotesStore(t.TempDir())
+	handle, err := store.Open("conn-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Replace(map[string]string{"2026-2-14": "x"}); err == nil {
+		t.Fatal("expected a non-canonical date key to be rejected")
+	}
+	if err := handle.Replace(map[string]string{"../escape": "x"}); err == nil {
+		t.Fatal("expected an unsafe date key to be rejected")
+	}
+}
+
 // The data directory layout must stay what the README documents.
 func TestDataDirectoryLayout(t *testing.T) {
 	dir := t.TempDir()

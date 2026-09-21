@@ -28,6 +28,15 @@ Also available in [简体中文](README.zh-CN.md).
 - `Ctrl`/`Cmd` + `Enter` saves, `Esc` closes, and the same editor clears an existing note
 - Notes persist through the Go sidecar, under the host's plugin data directory
 
+**Export and import**
+
+- The toolbar menu exports notes as `.xls` or `.txt`, over all dates or a range, or on a custom range
+- Import reads the first sheet of an `.xls` or `.xlsx` file, one date and note per row
+- The date column accepts text, a real date cell, or an Excel serial number
+- Rows whose first cell is not a date — the header and blanks — are skipped
+- Dates the file and the calendar both carry are reported as conflicts, resolved by overwrite, skip, or merge
+- Import replaces the whole note set in one call, so a failure cannot leave a half-applied import behind
+
 **Host integration**
 
 - Follows the DBX host locale, Chinese or English
