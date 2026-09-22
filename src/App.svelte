@@ -152,6 +152,8 @@
   let notes = $state({});
   let editingKey = $state(null);
   let draft = $state("");
+  /** The editor's field, focused whenever the editor opens. */
+  let editorInput = $state(null);
 
   let menuOpen = $state(false);
   let menuEl = $state(null);
@@ -241,6 +243,18 @@
     editingKey = null;
     draft = "";
   }
+
+  // Typing has to be possible the moment the editor appears, so the field is
+  // focused here rather than left to the `autofocus` attribute: that one is
+  // unreliable for an element added after the page loaded, and this UI lives in
+  // an iframe the host may not have focused. The caret goes to the end, which is
+  // where a note usually continues from.
+  $effect(() => {
+    if (!editingKey || !editorInput) return;
+    editorInput.focus();
+    const end = editorInput.value.length;
+    editorInput.setSelectionRange(end, end);
+  });
 
   async function saveNote() {
     await writeNote(editingKey, draft.trim());
@@ -811,11 +825,10 @@
         <span class="editor-date">{editingKey}</span>
         <span class="editor-hint">{text.hint}</span>
       </div>
-      <!-- svelte-ignore a11y_autofocus -->
       <textarea
+        bind:this={editorInput}
         bind:value={draft}
         placeholder={text.placeholder}
-        autofocus
         onkeydown={(event) => {
           if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
