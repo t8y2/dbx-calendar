@@ -390,7 +390,7 @@
   });
 
   /**
-   * Hands the file to the user.
+   * Hands the file to the user and says where it landed.
    *
    * A browser download cannot be detected from inside the page: in a sandboxed
    * frame without allow-downloads the anchor click neither throws nor delivers a
@@ -398,14 +398,18 @@
    * The verifiable write therefore comes first — the sidecar is an ordinary
    * process, and its reply either names a real path or fails — and the browser
    * download becomes best effort on top of it.
+   *
+   * The destination is returned rather than flashed here: the caller owns the
+   * one status line, and two flashes in the same tick would leave only the
+   * second one visible — losing the path the user needs to find the file.
    */
   async function saveExport(blob, filename) {
     const stored = await saveViaSidecar(blob, filename);
     // Without a sidecar there is nothing to fall back to: a plain browser tab
-    // relies on the anchor, and there it works.
+    // relies on the anchor, and there it works. The failure is already reported.
     if (!stored.ok) {
       anchorDownload(blob, filename);
-      return false;
+      return { ok: false, where: "" };
     }
 
     // A save picker lets the user choose a location, which beats a path inside the
@@ -416,8 +420,8 @@
         const writable = await handle.createWritable();
         await writable.write(blob);
         await writable.close();
-        flash(text.exported(exportRows.length));
-        return true;
+        // The user picked the place, so naming it again would only repeat them.
+        return { ok: true, where: "" };
       } catch (error) {
         if (error?.name !== "AbortError") {
           console.warn("[calendar] save picker failed; the stored copy stands:", error);
@@ -426,8 +430,7 @@
       }
     }
 
-    flash(stored.path ? text.savedTo(stored.path) : text.savedNoPath);
-    return true;
+    return { ok: true, where: stored.path ? text.savedTo(stored.path) : text.savedNoPath };
   }
 
   /** The classic route, used when there is no sidecar to write for us. */
@@ -496,9 +499,12 @@
         filename = `${stem}.xls`;
       }
 
-      if (await saveExport(blob, filename)) {
+      const outcome = await saveExport(blob, filename);
+      if (outcome.ok) {
         exportOpen = false;
-        flash(text.exported(rows.length));
+        // One line, so the path survives: the count alone left the user with no
+        // way to tell that a file had been written, or where.
+        flash([text.exported(rows.length), outcome.where].filter(Boolean).join(" · "));
       }
     } catch (error) {
       flash(`${text.exportFailed}: ${error.message}`);
