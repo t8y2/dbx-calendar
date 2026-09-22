@@ -3,14 +3,18 @@
   "manifest_version": 1,
   "id": "com.tenltrs.dbx-calendar",
   "name": "Calendar Notes",
-  "version": "0.1.3",
+  "version": "0.1.5",
   "publisher": "tenltrs",
   "description": "A minimal month-view calendar for keeping day-by-day notes.",
   "icon": "assets/icon.svg",
-  "source": "https://github.com/tenltrs/dbx-calendar/tree/v0.1.3",
+  "source": "https://github.com/tenltrs/dbx-calendar/tree/v0.1.5",
   "homepage": "https://github.com/tenltrs/dbx-calendar/",
-  "engines": { "dbx": ">=0.5.68", "host_api": "1" },
-  "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+  "permissions": [],
+  "engines": { "dbx": ">=0.6.0", "host_api": "1" },
+  "entrypoints": {
+    "backend": { "executable": "bin/dbx-plugin-dbx-calendar" },
+    "ui": { "root": "ui", "entry": "ui/index.html" }
+  },
   "contributions": [
     {
       "type": "workbench",

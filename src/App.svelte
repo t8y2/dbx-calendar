@@ -1,8 +1,26 @@
 <script>
   import { onMount } from "svelte";
+  // Imported statically on purpose. As a dynamic import Vite emits a relative
+  // specifier, and the DBX host inlines the entry script, so it resolves against
+  // the document root instead of /assets/ and the chunk 404s. Bundling it costs
+  // size up front but cannot fail at runtime.
+  //
+  // The full build is used rather than the mini one because only it can write
+  // and read the legacy .xls format; mini strips the CFB codec entirely.
+  import XLSX from "xlsx/dist/xlsx.full.min.js";
+  // Both icons are under Vite's inline threshold, so they become data URIs and
+  // never turn into a runtime fetch.
+  import xlsIcon from "../assets/xls.svg";
+  import txtIcon from "../assets/txt.svg";
+  import previousIcon from "../assets/previous.svg";
+  import nextIcon from "../assets/next.svg";
   import { dayInfo } from "./lunar.js";
+  import { invoke, whenReady, hostLocale, bridgeAvailable } from "./dbx.js";
 
-  const STORAGE_KEY = "dbx-calendar.notes.v1";
+  /** Vite inlines small SVGs as data URIs whose payload contains single quotes,
+   *  and an unquoted CSS url() rejects quote characters outright. Quoting here
+   *  keeps the value legal wherever it ends up. */
+  const maskVar = (url) => `--icon: url("${url}")`;
 
   const copy = {
     en: {
@@ -21,6 +39,48 @@
       dayOff: "Off",
       workday: "Work",
       edit: "double-click to edit",
+      menu: "Menu",
+      colDate: "Date",
+      colContent: "Note",
+      sheetName: "Notes",
+      exported: (count) => `Exported ${count} ${count === 1 ? "entry" : "entries"}`,
+      imported: (count, total, skipped) =>
+        [`Imported ${count} ${count === 1 ? "entry" : "entries"}`, `${total} total`, skipped ? `${skipped} rows skipped` : null]
+          .filter(Boolean)
+          .join(", "),
+      exportFailed: "Export failed",
+      savedTo: (path) => `Saved to ${path}`,
+      outputLabel: "Save to",
+      choosePath: "Choose…",
+      copyPath: "Copy path",
+      openFolder: "Open folder",
+      pathCopied: "Path copied",
+      copyFailed: "Could not copy the path",
+      openFolderFailed: "Could not open the folder",
+      importFailed: "Could not read that file",
+      saveFailed: "Could not save",
+      fileExcel: "Excel sheet",
+      fileText: "Text file",
+      rangeLabel: "Date range",
+      ranges: {
+        "1m": "Past month",
+        "3m": "Past 3 months",
+        "6m": "Past 6 months",
+        "1y": "Past year",
+        all: "All dates",
+        custom: "Custom",
+      },
+      entries: (count) => `${count} ${count === 1 ? "entry" : "entries"}`,
+      nothingInRange: "Nothing in this range",
+      export: "Export",
+      chooseFile: "Choose a file",
+      unsupportedFile: "Only .xls and .xlsx files can be imported",
+      noStorage: "Notes cannot be saved here, and will be lost when the page closes. Export to keep them.",
+      conflicts: (count) => `${count} conflicting ${count === 1 ? "date" : "dates"}`,
+      modeOverwrite: "Overwrite",
+      modeMerge: "Merge",
+      modeSkip: "Skip",
+      import: "Import",
     },
     zh: {
       prev: "上个月",
@@ -38,6 +98,46 @@
       dayOff: "休",
       workday: "班",
       edit: "双击编辑",
+      menu: "菜单",
+      colDate: "日期",
+      colContent: "内容",
+      sheetName: "备忘",
+      exported: (count) => `已导出 ${count} 条`,
+      imported: (count, total, skipped) =>
+        [`已导入 ${count} 条`, `共 ${total} 条`, skipped ? `跳过 ${skipped} 行` : null].filter(Boolean).join("，"),
+      exportFailed: "导出失败",
+      savedTo: (path) => `已保存到 ${path}`,
+      outputLabel: "输出地址",
+      choosePath: "选择…",
+      copyPath: "复制路径",
+      openFolder: "打开文件夹",
+      pathCopied: "已复制路径",
+      copyFailed: "复制路径失败",
+      openFolderFailed: "打开文件夹失败",
+      importFailed: "无法读取该文件",
+      saveFailed: "保存失败",
+      fileExcel: "Excel 表格",
+      fileText: "文本文件",
+      rangeLabel: "日期范围",
+      ranges: {
+        "1m": "近1个月",
+        "3m": "近3个月",
+        "6m": "近半年",
+        "1y": "近一年",
+        all: "全部范围",
+        custom: "自定义",
+      },
+      entries: (count) => `共 ${count} 条`,
+      nothingInRange: "该范围内没有内容",
+      export: "导出",
+      chooseFile: "选择文件",
+      unsupportedFile: "只支持 .xls 和 .xlsx 文件",
+      noStorage: "此处无法保存备忘，页面关闭后会丢失，请先导出保存。",
+      conflicts: (count) => `冲突 ${count} 条`,
+      modeOverwrite: "覆盖",
+      modeMerge: "合并",
+      modeSkip: "跳过",
+      import: "导入",
     },
   };
 
@@ -52,6 +152,35 @@
   let notes = $state({});
   let editingKey = $state(null);
   let draft = $state("");
+  /** The editor's field, focused whenever the editor opens. */
+  let editorInput = $state(null);
+
+  let menuOpen = $state(false);
+  let menuEl = $state(null);
+  let fileInput = $state(null);
+  let status = $state("");
+  let statusTimer;
+  /** Set when the sidecar refuses to store notes, so the UI stops implying it did. */
+  let notesError = $state("");
+
+  let exportOpen = $state(false);
+  let exportType = $state("xls");
+  let exportRange = $state("all");
+  let exportFrom = $state("");
+  let exportTo = $state("");
+  /** The absolute file the export will write, shown in the dialog and used as
+   *  given. Picking one in the save dialog replaces it wholesale. */
+  let exportPath = $state("");
+  /** Set once the user named the file themselves, which is what tells the
+   *  sidecar an existing file may be replaced. */
+  let exportChosen = $state(false);
+
+  let importOpen = $state(false);
+  let importFileName = $state("");
+  let importRows = $state([]);
+  let importSkipped = $state(0);
+  let importError = $state("");
+  let importMode = $state("overwrite");
 
   const todayKey = keyOf(now.getFullYear(), now.getMonth(), now.getDate());
 
@@ -115,17 +244,25 @@
     draft = "";
   }
 
-  function saveNote() {
-    const value = draft.trim();
-    if (value) notes = { ...notes, [editingKey]: value };
-    else deleteNote(editingKey);
-    persist();
+  // Typing has to be possible the moment the editor appears, so the field is
+  // focused here rather than left to the `autofocus` attribute: that one is
+  // unreliable for an element added after the page loaded, and this UI lives in
+  // an iframe the host may not have focused. The caret goes to the end, which is
+  // where a note usually continues from.
+  $effect(() => {
+    if (!editingKey || !editorInput) return;
+    editorInput.focus();
+    const end = editorInput.value.length;
+    editorInput.setSelectionRange(end, end);
+  });
+
+  async function saveNote() {
+    await writeNote(editingKey, draft.trim());
     closeEditor();
   }
 
-  function removeNote() {
-    deleteNote(editingKey);
-    persist();
+  async function removeNote() {
+    await writeNote(editingKey, "");
     closeEditor();
   }
 
@@ -134,54 +271,496 @@
     notes = rest;
   }
 
-  function persist() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(notes));
-    } catch {
-      // Sandboxed host without storage access: notes stay in memory for this session.
+  /**
+   * The sidecar owns the note set: it stores the day and answers with the whole
+   * map, so the grid never diverges from what is actually persisted. An empty
+   * value clears the day.
+   */
+  async function writeNote(key, value) {
+    const result = await invoke("dbx-calendar/notes/set", { date: key, value });
+    if (!result.ok) {
+      // A failure leaves the grid untouched rather than showing a note that was
+      // never stored.
+      notesError = result.error;
+      flash(`${text.saveFailed}: ${result.error}`);
+      return;
     }
+    notesError = "";
+    notes = result.value?.notes ?? {};
+  }
+
+  /**
+   * Replaces the whole note set at once, which is what an import does. Posting
+   * every date separately would be one round trip per row and could leave a
+   * half-applied import behind if one of them failed.
+   */
+  async function replaceNotes(next) {
+    const result = await invoke("dbx-calendar/notes/replace", { notes: next });
+    if (!result.ok) {
+      notesError = result.error;
+      flash(`${text.saveFailed}: ${result.error}`);
+      return false;
+    }
+    notesError = "";
+    notes = result.value?.notes ?? {};
+    return true;
+  }
+
+  async function loadNotes() {
+    const result = await invoke("dbx-calendar/notes/list");
+    if (!result.ok) {
+      notesError = result.error;
+      notes = {};
+      return;
+    }
+    notesError = "";
+    notes = result.value?.notes ?? {};
+  }
+
+  function flash(message) {
+    status = message;
+    clearTimeout(statusTimer);
+    statusTimer = setTimeout(() => (status = ""), 4000);
+  }
+
+  function toggleMenu() {
+    menuOpen = !menuOpen;
+  }
+
+  function handleWindowClick(event) {
+    if (menuOpen && menuEl && !menuEl.contains(event.target)) menuOpen = false;
   }
 
   function handleKeydown(event) {
-    if (event.key === "Escape" && editingKey) closeEditor();
+    if (event.key !== "Escape") return;
+    // The editor and the export dialog are modal, so they take Escape first.
+    if (editingKey) closeEditor();
+    else if (exportOpen) exportOpen = false;
+    else if (importOpen) closeImport();
+    else if (menuOpen) menuOpen = false;
+  }
+
+  /**
+   * Reads the date column as it can realistically come back: the "YYYY-MM-DD"
+   * text we write, a real date cell (Excel converts a typed date into one), or
+   * the serial number behind such a cell. Returns null for anything else, which
+   * is also what makes the header row and blank rows fall away on import.
+   */
+  function dateKeyOf(value) {
+    if (value instanceof Date && !Number.isNaN(+value)) {
+      return keyOf(value.getFullYear(), value.getMonth(), value.getDate());
+    }
+
+    if (typeof value === "number") {
+      // Excel day 1 is 1900-01-01, offset by its imaginary 1900-02-29.
+      const serial = new Date(Date.UTC(1899, 11, 30) + value * 86_400_000);
+      return keyOf(serial.getUTCFullYear(), serial.getUTCMonth(), serial.getUTCDate());
+    }
+
+    const match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(String(value ?? "").trim());
+    if (!match) return null;
+
+    const [year, month, day] = match.slice(1).map(Number);
+    const date = new Date(year, month - 1, day);
+    // Date rolls impossible values over (2026-02-30 becomes 2026-03-02), so
+    // compare the parts back to reject them.
+    return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day
+      ? keyOf(year, month - 1, day)
+      : null;
+  }
+
+  /** Subtracts whole months, clamping to the target month's length so that
+   *  31 March minus one month lands on 28/29 February instead of rolling into March. */
+  function shiftMonths(date, months) {
+    const shifted = new Date(date.getFullYear(), date.getMonth() - months, 1);
+    const lastDay = new Date(shifted.getFullYear(), shifted.getMonth() + 1, 0).getDate();
+    shifted.setDate(Math.min(date.getDate(), lastDay));
+    return shifted;
+  }
+
+  function boundsFor(range) {
+    if (range === "all") {
+      const keys = Object.keys(notes).sort();
+      return keys.length ? [keys[0], keys[keys.length - 1]] : [todayKey, todayKey];
+    }
+    const start = shiftMonths(now, { "1m": 1, "3m": 3, "6m": 6, "1y": 12 }[range]);
+    return [keyOf(start.getFullYear(), start.getMonth(), start.getDate()), todayKey];
+  }
+
+  async function openExport() {
+    menuOpen = false;
+    exportType = "xls";
+    exportRange = "all";
+    const [from, to] = boundsFor("all");
+    exportFrom = from;
+    exportTo = to;
+    exportChosen = false;
+    exportOpen = true;
+    // The dialog opens on a path rather than filling one in later, so the user
+    // sees where the file is going before deciding to write it.
+    await loadDestination();
+  }
+
+  /** Switching format keeps the folder and the stem, so a renamed file stays
+   *  renamed and the destination does not jump back to the default. */
+  function setExportType(type) {
+    exportType = type;
+    exportPath = replaceExtension(exportPath, type);
+  }
+
+  function pickRange(range) {
+    exportRange = range;
+    // Custom leaves the pickers alone so they keep whatever the user last saw.
+    if (range === "custom") return;
+    const [from, to] = boundsFor(range);
+    exportFrom = from;
+    exportTo = to;
+  }
+
+  /** Notes inside the closed range, oldest first. Date keys sort chronologically
+   *  as plain strings, so the comparison needs no parsing. */
+  const exportRows = $derived.by(() => {
+    if (!exportOpen) return [];
+    return Object.keys(notes)
+      .filter((key) => key >= (exportFrom || "0000-00-00") && key <= (exportTo || "9999-99-99"))
+      .sort()
+      .map((key) => [key, notes[key]]);
+  });
+
+  /** The file name an export of this format would like to use. */
+  function exportFileName(type) {
+    return `calendar-notes-${todayKey}.${type}`;
+  }
+
+  /** The UI cannot join paths, and the host hands back a native one, so this
+   *  only has to supply whichever separator the folder is missing. */
+  function joinPath(directory, name) {
+    if (!directory) return name;
+    const separator = directory.includes("\\") ? "\\" : "/";
+    return directory.endsWith(separator) ? `${directory}${name}` : `${directory}${separator}${name}`;
+  }
+
+  /** Swaps the extension, keeping the folder and the stem the user may have
+   *  renamed: switching format should not move the file or rename it back. */
+  function replaceExtension(path, extension) {
+    // No destination to rewrite yet; an invented ".txt" would be worse than an
+    // empty field, which at least shows that the host never answered.
+    if (!path) return "";
+    const cut = path.lastIndexOf(".");
+    const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+    return `${cut > slash ? path.slice(0, cut) : path}.${extension}`;
+  }
+
+  /**
+   * Asks the host where an export should go: the folder the user last chose, or
+   * their downloads folder the first time.
+   */
+  async function loadDestination() {
+    const result = await invoke("dbx-calendar/export/destination");
+    const directory = result.ok ? (result.value?.directory ?? "") : "";
+    exportPath = joinPath(directory, exportFileName(exportType));
+  }
+
+  /** Opens the OS save dialog. Whatever it returns becomes the destination, so
+   *  the user can rename the file as well as move it. */
+  async function chooseExportPath() {
+    const result = await invoke("dbx-calendar/export/pick", {
+      initial: exportPath,
+      title: text.export,
+      label: exportType === "txt" ? text.fileText : text.fileExcel,
+      extension: exportType,
+    });
+    if (!result.ok) {
+      flash(`${text.exportFailed}: ${result.error}`);
+      return;
+    }
+    if (result.value?.cancelled) return;
+    const chosen = result.value?.path;
+    if (typeof chosen === "string" && chosen) {
+      exportPath = chosen;
+      // Named by hand in a dialog that already asked about replacing it, so the
+      // export writes exactly here rather than beside an existing file.
+      exportChosen = true;
+    }
+  }
+
+  async function copyExportPath() {
+    const result = await invoke("dbx-calendar/export/copy", { text: exportPath });
+    flash(result.ok ? text.pathCopied : `${text.copyFailed}: ${result.error}`);
+  }
+
+  async function revealExportPath() {
+    const result = await invoke("dbx-calendar/export/reveal", { path: exportPath });
+    if (!result.ok) flash(`${text.openFolderFailed}: ${result.error}`);
+  }
+
+  /** The browser's own download, for a page opened outside the host: there is
+   *  no sidecar to write for us there, and no sandbox to drop the click. */
+  function anchorDownload(blob, filename) {
+    try {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.click();
+      // Revoking straight away can cancel the download before it starts.
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch (error) {
+      flash(`${text.exportFailed}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Writes the file through sidecar and reports where it landed. The reply is
+   * the only evidence either side of this feature can trust, which is why it is
+   * attempted before any browser route.
+   */
+  async function runExport() {
+    const rows = exportRows;
+    if (!rows.length) return;
+
+    try {
+      let blob;
+      if (exportType === "txt") {
+        // Named `body` rather than `text`: `text` is the copy table.
+        // A note may hold line breaks of its own, which would otherwise split
+        // one record across several lines and leave everything after the first
+        // without a date. They travel as the two characters `\n` instead, so
+        // every record stays exactly one line: date, tab, note. CR and CRLF are
+        // folded in too — both are "a line break here", whatever the note was
+        // pasted from.
+        const oneLine = (value) => value.replace(/\r\n?|\n/g, "\\n");
+        const body = rows.map(([key, content]) => `${key}\t${oneLine(content)}`).join("\n");
+        blob = new Blob([`${body}\n`], { type: "text/plain;charset=utf-8" });
+      } else {
+        const sheet = XLSX.utils.aoa_to_sheet([[text.colDate, text.colContent], ...rows]);
+        sheet["!cols"] = [{ wch: 12 }, { wch: 60 }];
+        const book = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(book, sheet, text.sheetName);
+        blob = new Blob([XLSX.write(book, { bookType: "xls", type: "array" })], {
+          type: "application/vnd.ms-excel",
+        });
+      }
+
+      // Outside the host there is no sidecar to write for us, and no sandbox to
+      // drop the click either — a browser tab still downloads the file.
+      if (!bridgeAvailable) {
+        anchorDownload(blob, exportFileName(exportType));
+        exportOpen = false;
+        flash(text.exported(rows.length));
+        return;
+      }
+
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      // Chunked so a large workbook cannot blow the argument limit of from().
+      let binary = "";
+      for (let index = 0; index < bytes.length; index += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+      }
+
+      const result = await invoke("dbx-calendar/export/write", {
+        path: exportPath,
+        data: btoa(binary),
+        overwrite: exportChosen,
+      });
+      if (!result.ok) {
+        flash(`${text.exportFailed}: ${result.error}`);
+        return;
+      }
+
+      exportOpen = false;
+      // The reply names the file that was actually written, which is not always
+      // the one asked for: a taken name gains " (2)" rather than replacing it.
+      const written = result.value?.path || exportPath;
+      flash([text.exported(rows.length), text.savedTo(written)].filter(Boolean).join(" · "));
+    } catch (error) {
+      flash(`${text.exportFailed}: ${error.message}`);
+    }
+  }
+
+  function openImport() {
+    menuOpen = false;
+    importFileName = "";
+    importRows = [];
+    importSkipped = 0;
+    importError = "";
+    importMode = "overwrite";
+    importOpen = true;
+  }
+
+  function closeImport() {
+    importOpen = false;
+    importFileName = "";
+    importRows = [];
+    importSkipped = 0;
+    importError = "";
+  }
+
+  /** Reads the first sheet into [dateKey, content] pairs, dropping rows whose
+   *  first cell is not a date — which is how the header and blanks fall away. */
+  async function readSheet(file) {
+    const book = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
+    const sheet = book.Sheets[book.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: "" });
+
+    const parsed = [];
+    let skipped = 0;
+    for (const [rawDate, rawContent] of rows) {
+      const key = dateKeyOf(rawDate);
+      const content = String(rawContent ?? "").trim();
+      if (!key) {
+        if (String(rawDate ?? "").trim() || content) skipped += 1;
+        continue;
+      }
+      if (content) parsed.push([key, content]);
+    }
+    return { parsed, skipped };
+  }
+
+  /** The accept attribute only filters the picker; a user can still switch to
+   *  "All files", so the extension is checked again here. */
+  function isImportable(file) {
+    const extension = file.name.split(".").pop()?.toLowerCase();
+    return extension === "xls" || extension === "xlsx";
+  }
+
+  async function pickImportFile(event) {
+    const file = event.target.files?.[0];
+    // Clear the input so picking the same file twice still fires a change.
+    event.target.value = "";
+    if (!file) return;
+
+    importFileName = file.name;
+    importRows = [];
+    importSkipped = 0;
+    importMode = "overwrite";
+    importError = "";
+
+    if (!isImportable(file)) {
+      importError = text.unsupportedFile;
+      return;
+    }
+
+    try {
+      const { parsed, skipped } = await readSheet(file);
+      importRows = parsed;
+      importSkipped = skipped;
+    } catch (error) {
+      importError = `${text.importFailed}: ${error.message}`;
+    }
+  }
+
+  /** Dates the file and the calendar both have an entry for. */
+  const importConflicts = $derived.by(
+    () => importRows.filter(([key]) => notes[key] !== undefined).length,
+  );
+
+  async function runImport() {
+    if (!importRows.length) return;
+
+    const next = { ...notes };
+    for (const [key, content] of importRows) {
+      if (next[key] === undefined) {
+        // Nothing to conflict with, so every mode adds it.
+        next[key] = content;
+        continue;
+      }
+      if (importMode === "skip") continue;
+      next[key] = importMode === "merge" ? `${next[key]}\n${content}` : content;
+    }
+
+    const count = importRows.length;
+    // Report only what the sidecar actually accepted.
+    if (!(await replaceNotes(next))) return;
+    closeImport();
+    flash(text.imported(count, Object.keys(notes).length, importSkipped));
+  }
+
+  /**
+   * Notes live in the Go sidecar, not in the page: the plugin frame runs on an
+   * opaque origin, so localStorage throws on every access. The bridge is absent
+   * when the page is opened directly in a browser, which leaves the calendar
+   * functional but unable to store anything.
+   */
+  async function init() {
+    if (hostLocale().toLowerCase().startsWith("zh")) lang = "zh";
+
+    const context = await whenReady();
+    const locale = context?.locale ?? hostLocale();
+    if (locale?.toLowerCase().startsWith("zh")) lang = "zh";
+
+    await loadNotes();
   }
 
   onMount(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) notes = JSON.parse(stored) ?? {};
-    } catch {
-      notes = {};
-    }
-
-    // The DBX bridge is absent when the page is opened directly in a browser.
-    const host = window.dbxPlugin;
-    if (!host) return;
-    if (host.locale?.toLowerCase().startsWith("zh")) lang = "zh";
-    host.ready?.then((context) => {
-      const locale = context?.locale ?? host.locale;
-      if (locale?.toLowerCase().startsWith("zh")) lang = "zh";
-    });
+    void init();
   });
 </script>
 
 <svelte:head><title>DBX Calendar</title></svelte:head>
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} onclick={handleWindowClick} />
 
 <main>
   <header class="toolbar">
     <h1>{monthTitle}</h1>
-    <div class="nav">
-      <button type="button" onclick={() => step(-1)} aria-label={text.prev}
-        >‹</button
-      >
-      <button type="button" class="today" onclick={goToday}>{text.today}</button
-      >
-      <button type="button" onclick={() => step(1)} aria-label={text.next}
-        >›</button
-      >
+    <div class="actions">
+      <div class="menu" bind:this={menuEl}>
+        <button
+          type="button"
+          class="menu-button"
+          aria-label={text.menu}
+          aria-expanded={menuOpen}
+          onclick={toggleMenu}
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+            <path
+              d="M2 4h12M2 8h12M2 12h12"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+            />
+          </svg>
+        </button>
+        {#if menuOpen}
+          <div class="dropdown">
+            <button type="button" onclick={openExport}>{text.export}</button>
+            <button type="button" onclick={openImport}>{text.import}</button>
+          </div>
+        {/if}
+      </div>
+
+      <div class="nav">
+        <button
+          type="button"
+          class="arrow"
+          style={maskVar(previousIcon)}
+          onclick={() => step(-1)}
+          aria-label={text.prev}
+        ></button>
+        <button type="button" class="today" onclick={goToday}>{text.today}</button>
+        <button
+          type="button"
+          class="arrow"
+          style={maskVar(nextIcon)}
+          onclick={() => step(1)}
+          aria-label={text.next}
+        ></button>
+      </div>
+
+      <input
+        type="file"
+        accept=".xls,.xlsx"
+        bind:this={fileInput}
+        onchange={pickImportFile}
+        hidden
+      />
     </div>
   </header>
+
+  {#if notesError}
+    <p class="notice">{text.noStorage}: {notesError}</p>
+  {/if}
 
   <div
     class="grid"
@@ -228,6 +807,10 @@
   </div>
 </main>
 
+{#if status}
+  <div class="status" role="status">{status}</div>
+{/if}
+
 {#if editingKey}
   <!-- 蒙版只做视觉遮罩，点击不关闭；关闭走「取消」按钮或 Esc，避免误触丢失正在编辑的内容 -->
   <div class="backdrop">
@@ -242,11 +825,10 @@
         <span class="editor-date">{editingKey}</span>
         <span class="editor-hint">{text.hint}</span>
       </div>
-      <!-- svelte-ignore a11y_autofocus -->
       <textarea
+        bind:this={editorInput}
         bind:value={draft}
         placeholder={text.placeholder}
-        autofocus
         onkeydown={(event) => {
           if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
@@ -267,6 +849,142 @@
         <button type="button" class="primary" onclick={saveNote}
           >{text.save}</button
         >
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if exportOpen}
+  <div class="backdrop">
+    <div class="dialog" role="dialog" aria-modal="true" aria-label={text.export} tabindex="-1">
+      <div class="types" role="radiogroup" aria-label={text.export}>
+        <button
+          type="button"
+          class="type"
+          class:active={exportType === "xls"}
+          role="radio"
+          aria-checked={exportType === "xls"}
+          onclick={() => setExportType("xls")}
+        >
+          <img src={xlsIcon} alt="" />
+          <span>{text.fileExcel}</span>
+        </button>
+        <button
+          type="button"
+          class="type"
+          class:active={exportType === "txt"}
+          role="radio"
+          aria-checked={exportType === "txt"}
+          onclick={() => setExportType("txt")}
+        >
+          <img src={txtIcon} alt="" />
+          <span>{text.fileText}</span>
+        </button>
+      </div>
+
+      <div class="destination">
+        <span class="destination-label">{text.outputLabel}</span>
+        <p class="destination-path" title={exportPath}>{exportPath}</p>
+        <div class="destination-actions">
+          <button type="button" class="ghost" onclick={chooseExportPath}>{text.choosePath}</button>
+          <button type="button" class="ghost" onclick={copyExportPath}>{text.copyPath}</button>
+          <button type="button" class="ghost" onclick={revealExportPath}>{text.openFolder}</button>
+        </div>
+      </div>
+
+      <div class="range-inputs">
+        <input
+          type="date"
+          aria-label={text.rangeLabel}
+          bind:value={exportFrom}
+          disabled={exportRange !== "custom"}
+        />
+        <span class="dash">–</span>
+        <input
+          type="date"
+          aria-label={text.rangeLabel}
+          bind:value={exportTo}
+          disabled={exportRange !== "custom"}
+        />
+      </div>
+
+      <div class="ranges" role="radiogroup" aria-label={text.rangeLabel}>
+        {#each Object.entries(text.ranges) as [key, label] (key)}
+          <label class:active={exportRange === key}>
+            <input
+              type="radio"
+              name="export-range"
+              value={key}
+              checked={exportRange === key}
+              onchange={() => pickRange(key)}
+            />
+            {label}
+          </label>
+        {/each}
+      </div>
+
+      <div class="dialog-actions">
+        <span class="count">
+          {#if exportRows.length}
+            {text.entries(exportRows.length)}
+          {:else if notesError}
+            {text.nothingInRange} — {text.saveFailed}: {notesError}
+          {:else}
+            {text.nothingInRange}
+          {/if}
+        </span>
+        <button type="button" class="ghost" onclick={() => (exportOpen = false)}>{text.cancel}</button>
+        <button type="button" class="primary" disabled={!exportRows.length} onclick={runExport}>
+          {text.export}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if importOpen}
+  <div class="backdrop">
+    <div class="dialog" role="dialog" aria-modal="true" aria-label={text.import} tabindex="-1">
+      <div class="import-icon">
+        <img src={xlsIcon} alt="" />
+      </div>
+
+      <button type="button" class="file-button" onclick={() => fileInput?.click()}>
+        {importFileName || text.chooseFile}
+      </button>
+
+      {#if importError}
+        <p class="error">{importError}</p>
+      {:else if importFileName}
+        <p class="summary">
+          {text.entries(importRows.length)}{importConflicts
+            ? ` · ${text.conflicts(importConflicts)}`
+            : ""}
+        </p>
+
+        {#if importConflicts}
+          <div class="modes" role="radiogroup" aria-label={text.conflicts(importConflicts)}>
+            {#each [["overwrite", text.modeOverwrite], ["merge", text.modeMerge], ["skip", text.modeSkip]] as [key, label] (key)}
+              <label class:active={importMode === key}>
+                <input
+                  type="radio"
+                  name="import-mode"
+                  value={key}
+                  checked={importMode === key}
+                  onchange={() => (importMode = key)}
+                />
+                {label}
+              </label>
+            {/each}
+          </div>
+        {/if}
+      {/if}
+
+      <div class="dialog-actions">
+        <button type="button" class="ghost" onclick={closeImport}>{text.cancel}</button>
+        <button type="button" class="primary" disabled={!importRows.length} onclick={runImport}>
+          {text.import}
+        </button>
       </div>
     </div>
   </div>
@@ -306,7 +1024,7 @@
   /* Toolbar stays quiet: the grid is the interface. */
   .toolbar {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     justify-content: space-between;
     gap: 16px;
     padding: 0 2px;
@@ -337,7 +1055,109 @@
   .nav button:hover {
     background: var(--tint);
   }
+  /* The arrow SVGs are filled with a fixed dark navy, which would disappear on
+     a dark theme as a plain <img>. Masking them instead paints the shape with
+     currentColor, so they follow the host theme. Drawn on a pseudo-element so
+     the button's own hover background stays independent of the icon. */
+  .nav .arrow {
+    display: grid;
+    place-items: center;
+    padding: 0;
+  }
+  .nav .arrow::before {
+    content: "";
+    width: 13px;
+    height: 13px;
+    background-color: currentColor;
+    -webkit-mask: var(--icon) center / contain no-repeat;
+    mask: var(--icon) center / contain no-repeat;
+  }
   .nav .today {
+    font-size: 12.5px;
+  }
+
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .notice {
+    margin: 0;
+    padding: 7px 10px;
+    border: 1px solid color-mix(in srgb, #e5484d 40%, transparent);
+    border-radius: 8px;
+    color: color-mix(in srgb, #e5484d 80%, CanvasText);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .menu {
+    position: relative;
+  }
+  .menu-button {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 1px solid var(--rule);
+    border-radius: 7px;
+    color: inherit;
+    background: transparent;
+    cursor: pointer;
+  }
+  .menu-button:hover {
+    background: var(--tint);
+  }
+  .menu-button svg {
+    width: 15px;
+    height: 15px;
+  }
+
+  /* Anchored to the button's right edge so it opens leftward, away from the
+     panel edge. */
+  .dropdown {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    min-width: 150px;
+    padding: 4px;
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    background: Canvas;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.18);
+  }
+  .dropdown button {
+    padding: 7px 10px;
+    border: 0;
+    border-radius: 6px;
+    color: inherit;
+    background: transparent;
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .dropdown button:hover {
+    background: var(--tint);
+  }
+
+  /* Floating so that reporting a result never shifts the grid. */
+  .status {
+    position: fixed;
+    bottom: 18px;
+    left: 50%;
+    z-index: 20;
+    padding: 8px 14px;
+    transform: translateX(-50%);
+    border-radius: 8px;
+    color: Canvas;
+    background: color-mix(in srgb, CanvasText 85%, Canvas);
     font-size: 12.5px;
   }
 
@@ -524,15 +1344,22 @@
     outline: 2px solid var(--accent);
     outline-offset: -1px;
   }
-  .editor-actions {
+  .editor-actions,
+  .dialog-actions {
     display: flex;
     align-items: center;
     gap: 8px;
   }
+  /* Keeps cancel/confirm on the right in both dialogs. The export dialog has a
+     leading count, but the import one does not, so it needs this explicitly. */
+  .dialog-actions {
+    justify-content: flex-end;
+  }
   .spacer {
     flex: 1;
   }
-  .editor-actions button {
+  .editor-actions button,
+  .dialog-actions button {
     height: 32px;
     padding: 0 14px;
     border: 1px solid transparent;
@@ -541,22 +1368,214 @@
     font-size: 13px;
     cursor: pointer;
   }
-  .editor-actions .primary {
+  .editor-actions .primary,
+  .dialog-actions .primary {
     color: #fff;
     background: var(--accent);
   }
+  .dialog-actions .primary:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
   .editor-actions .ghost,
-  .editor-actions .danger {
+  .editor-actions .danger,
+  .dialog-actions .ghost {
     border-color: var(--rule);
     color: inherit;
     background: transparent;
   }
   .editor-actions .ghost:hover,
-  .editor-actions .danger:hover {
+  .editor-actions .danger:hover,
+  .dialog-actions .ghost:hover {
     background: var(--tint);
   }
   .editor-actions .danger {
     color: color-mix(in srgb, #e5484d 80%, CanvasText);
+  }
+
+  /* Export dialog */
+  .dialog {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    width: min(420px, 100%);
+    padding: 16px;
+    border: 1px solid var(--rule);
+    border-radius: 14px;
+    background: Canvas;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.3);
+  }
+
+  .types {
+    display: flex;
+    gap: 10px;
+  }
+  .type {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 12px 8px;
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    color: inherit;
+    background: transparent;
+    font: inherit;
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  .type img {
+    width: 32px;
+    height: 32px;
+  }
+  .type:hover {
+    background: var(--tint);
+  }
+  .type.active {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 8%, Canvas);
+  }
+
+  /* The destination is the one piece of the dialog the user may need to read
+     character by character, so the path wraps rather than truncating. */
+  .destination {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .destination-label {
+    color: var(--muted);
+    font-size: 11.5px;
+  }
+  .destination-path {
+    margin: 0;
+    padding: 7px 9px;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    background: color-mix(in srgb, CanvasText 3%, Canvas);
+    font-size: 11.5px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+  }
+  .destination-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .destination-actions button {
+    height: 28px;
+    padding: 0 10px;
+    border: 1px solid var(--rule);
+    border-radius: 7px;
+    color: inherit;
+    background: transparent;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .destination-actions button:hover {
+    background: var(--tint);
+  }
+
+  .range-inputs {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .range-inputs input {
+    flex: 1;
+    min-width: 0;
+    height: 32px;
+    padding: 0 8px;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    color: inherit;
+    background: color-mix(in srgb, CanvasText 3%, Canvas);
+    font: inherit;
+    font-size: 12.5px;
+  }
+  .range-inputs input:disabled {
+    opacity: 0.55;
+  }
+  .dash {
+    color: var(--muted);
+  }
+
+  .ranges,
+  .modes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .ranges label,
+  .modes label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 11px;
+    border: 1px solid var(--rule);
+    border-radius: 20px;
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  .ranges label:hover,
+  .modes label:hover {
+    background: var(--tint);
+  }
+  .ranges label.active,
+  .modes label.active {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 8%, Canvas);
+  }
+  .ranges input,
+  .modes input {
+    margin: 0;
+    accent-color: var(--accent);
+  }
+
+  /* Import dialog */
+  .import-icon {
+    display: grid;
+    place-items: center;
+  }
+  .import-icon img {
+    width: 44px;
+    height: 44px;
+  }
+  .file-button {
+    height: 34px;
+    padding: 0 12px;
+    overflow: hidden;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    color: inherit;
+    background: transparent;
+    font: inherit;
+    font-size: 12.5px;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    cursor: pointer;
+  }
+  .file-button:hover {
+    background: var(--tint);
+  }
+  .summary,
+  .error {
+    margin: 0;
+    font-size: 12.5px;
+  }
+  .summary {
+    color: var(--muted);
+  }
+  .error {
+    color: color-mix(in srgb, #e5484d 80%, CanvasText);
+  }
+
+  .count {
+    margin-right: auto;
+    color: var(--muted);
+    font-size: 12px;
   }
 
   @media (prefers-reduced-motion: reduce) {

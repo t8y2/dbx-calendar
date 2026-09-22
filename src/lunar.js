@@ -1,5 +1,4 @@
 import { getDayDetail, getLunarDate, getLunarFestivals, getSolarTerms } from "chinese-days";
-import { bundledHoliday } from "./holiday-data.js";
 
 /**
  * The library ships roughly 70 lunar festivals a year, most of them almanac
@@ -83,14 +82,17 @@ const FIXED_HOLIDAYS = { 元旦: "01-01", 劳动节: "05-01", 国庆节: "10-01"
 
 /**
  * Festivals and solar terms are computed, so they cover any year. The statutory
- * holiday schedule is not a computation but a published document, available
- * from two places: the npm library, which stops after 2026, and the bundled
- * json/holiday-<year>.json files.
+ * holiday schedule is not a computation but a published document, and the npm
+ * library carries it only up to 2026.
  *
  * 元旦 and 国庆 are statutory holidays every year, so their presence is a cheap,
  * dependable probe for whether the library actually carries this year's
  * schedule — it reports nothing for years it has no data for. Verified against
  * a full 365-day scan for 2018–2035: identical verdict.
+ *
+ * For a year the library does not carry, the calendar shows lunar dates and
+ * solar terms only, with no 休 / 班 markers. There is deliberately no fallback
+ * data source: a year without a schedule simply has none.
  */
 function yearIndex(year) {
   const cached = years.get(year);
@@ -117,20 +119,17 @@ function yearIndex(year) {
 }
 
 /**
- * The published schedule for a date, from the library when it has one and from
- * the bundled JSON files otherwise. Returns null on an ordinary day, so a plain
- * weekend is never mistaken for a holiday.
+ * The published schedule for a date, or null when the library carries no
+ * schedule for that year or the day is ordinary, so a plain weekend is never
+ * mistaken for a holiday.
  */
 function scheduleFor(dateKey) {
-  if (yearIndex(Number(dateKey.slice(0, 4))).hasSchedule) {
-    // A holiday reads "National Day,国庆节,3"; a plain weekend reads "Saturday".
-    const detail = getDayDetail(dateKey);
-    if (!detail?.name?.includes(",")) return null;
-    return { name: detail.name.split(",")[1], off: !detail.work };
-  }
+  if (!yearIndex(Number(dateKey.slice(0, 4))).hasSchedule) return null;
 
-  const entry = bundledHoliday(dateKey);
-  return entry ? { name: entry.name, off: entry.holiday } : null;
+  // A holiday reads "National Day,国庆节,3"; a plain weekend reads "Saturday".
+  const detail = getDayDetail(dateKey);
+  if (!detail?.name?.includes(",")) return null;
+  return { name: detail.name.split(",")[1], off: !detail.work };
 }
 
 function ordinal(value) {
