@@ -9,3 +9,5 @@
 /node_modules/
 CLAUDE.md
 *.idea/
+*.claude/
+/ui/
