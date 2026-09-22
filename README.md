@@ -31,7 +31,7 @@ Also available in [简体中文](README.zh-CN.md).
 **Export and import**
 
 - The toolbar menu exports notes as `.xls` or `.txt`, over all dates or a range, or on a custom range
-- A save picker is used when the host offers one; otherwise the sidecar writes the file and the toast reports the path
+- The destination is shown in the dialog and can be changed; a copy-path and an open-folder button act on it
 - Import reads the first sheet of an `.xls` or `.xlsx` file, one date and note per row
 - The date column accepts text, a real date cell, or an Excel serial number
 - Rows whose first cell is not a date — the header and blanks — are skipped
@@ -74,17 +74,20 @@ The host sets `DBX_PLUGIN_DATA_DIR` on every sidecar. Notes live in `notes/<name
 
 The namespace is the connection id when the host addresses a connection, and the fixed string `workbench` otherwise. Without a data directory the sidecar still runs, but a note write is refused with an explicit error instead of a fake success, and the UI shows it.
 
-### Why the sidecar writes exports
+### Where exports go
 
-The host renders this UI in a sandboxed frame, and a frame without `allow-downloads` **silently drops** an anchor click on a blob URL: nothing throws, and no file arrives. The host bridge exposes no download or save method either.
+The host renders this UI in a sandboxed frame with an opaque origin, and a frame without `allow-downloads` **silently drops** an anchor click on a blob URL: nothing throws, and no file arrives. That route is therefore not an option inside DBX, which leaves the sidecar — an ordinary process, which can put the file wherever the user says.
 
-So exporting tries, in order:
+The export dialog shows the destination and lets the user change it:
 
-1. `showSaveFilePicker`, the one browser route that works without `allow-downloads` because the user names the file.
-2. The classic anchor download, which is what a plain browser tab uses.
-3. The sidecar, which writes `exports/<name>-<timestamp>.<ext>` under the data directory and reports the absolute path in the toast.
+- The path starts at the folder they last exported into, or their downloads folder the first time. It is remembered under the data directory as `export-dir`.
+- **Choose…** opens the OS save dialog, so the folder *and* the file name are the user's. Whatever it returns is used verbatim; the OS asks about replacing an existing file there, so that file is replaced.
+- A destination that was not named by hand is never allowed to overwrite: a taken name gains ` (2)`, ` (3)` and so on.
+- **Copy path** and **Open folder** act on the same path, the latter revealing the file in Explorer.
 
-Dismissing the save picker is treated as a decision, not a failure, so the file is not also written behind the user's back. A failed write is surfaced rather than reported as a successful export.
+A failed write is surfaced rather than reported as a successful export. Opening the page outside the host leaves no sidecar to write for us, so a plain browser tab falls back to its own download.
+
+The native save dialog, revealing a file and the clipboard all go through the Windows shell, so **those three features are Windows-only**; the export itself is portable.
 
 ## Build and release
 
@@ -114,6 +117,8 @@ src/
 backend/
   main.go            sidecar entry point and the RPC method table
   notes.go           atomic per-namespace note storage
+  export.go          writes the exported file wherever the user pointed it
+  powershell.go      native save dialog, Explorer and the clipboard (Windows)
   datadir.go         resolves the host-provided data directory
 assets/              plugin icons
 ui/                  build output — generated, do not edit

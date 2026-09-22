@@ -113,24 +113,59 @@ func (plugin *plugin) Handle(
 			return nil, dbxpluginsdk.NewError(-32603, err.Error())
 		}
 		return map[string]any{"success": true, "notes": all}, nil
-	case "dbx-calendar/export/write":
-		name, encoded, err := decodeExport(values)
+	case "dbx-calendar/export/destination":
+		return map[string]any{"directory": plugin.exports.Destination()}, nil
+	case "dbx-calendar/export/pick":
+		initial, title, label, extension, err := decodePick(values)
 		if err != nil {
 			return nil, dbxpluginsdk.NewError(-32602, err.Error())
 		}
-		written, writeErr := plugin.exports.Write(name, encoded)
+		chosen, pickErr := pickSavePath(initial, title, label, extension)
+		if pickErr != nil {
+			return nil, dbxpluginsdk.NewError(-32603, pickErr.Error())
+		}
+		if chosen == "" {
+			return map[string]any{"cancelled": true}, nil
+		}
+		plugin.exports.Remember(chosen)
+		return map[string]any{"path": chosen, "cancelled": false}, nil
+	case "dbx-calendar/export/write":
+		path, encoded, overwrite, err := decodeExport(values)
+		if err != nil {
+			return nil, dbxpluginsdk.NewError(-32602, err.Error())
+		}
+		written, writeErr := plugin.exports.Write(path, encoded, overwrite)
 		if writeErr != nil {
+			// An oversized payload is the caller's mistake; anything else is
+			// this side failing to reach the disk it was pointed at.
 			if errors.Is(writeErr, ErrExportTooLarge) {
 				return nil, dbxpluginsdk.NewError(-32602, writeErr.Error())
 			}
-			return nil, notesError(writeErr)
+			return nil, dbxpluginsdk.NewError(-32603, writeErr.Error())
 		}
+		plugin.exports.Remember(written.Path)
 		return map[string]any{
 			"success":   true,
 			"path":      written.Path,
 			"size":      written.Size,
 			"directory": written.Directory,
 		}, nil
+	case "dbx-calendar/export/reveal":
+		path, _ := values["path"].(string)
+		folder, revealErr := revealInExplorer(path)
+		if revealErr != nil {
+			return nil, dbxpluginsdk.NewError(-32603, revealErr.Error())
+		}
+		return map[string]any{"success": true, "folder": folder}, nil
+	case "dbx-calendar/export/copy":
+		text, _ := values["text"].(string)
+		if text == "" {
+			return nil, dbxpluginsdk.NewError(-32602, "Missing required parameter: text")
+		}
+		if copyErr := setClipboard(text); copyErr != nil {
+			return nil, dbxpluginsdk.NewError(-32603, copyErr.Error())
+		}
+		return map[string]any{"success": true}, nil
 	default:
 		return nil, dbxpluginsdk.MethodNotFound(method)
 	}

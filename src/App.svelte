@@ -15,7 +15,7 @@
   import previousIcon from "../assets/previous.svg";
   import nextIcon from "../assets/next.svg";
   import { dayInfo } from "./lunar.js";
-  import { invoke, whenReady, hostLocale } from "./dbx.js";
+  import { invoke, whenReady, hostLocale, bridgeAvailable } from "./dbx.js";
 
   /** Vite inlines small SVGs as data URIs whose payload contains single quotes,
    *  and an unquoted CSS url() rejects quote characters outright. Quoting here
@@ -50,7 +50,13 @@
           .join(", "),
       exportFailed: "Export failed",
       savedTo: (path) => `Saved to ${path}`,
-      savedNoPath: "Saved, but the host did not report where",
+      outputLabel: "Save to",
+      choosePath: "Choose…",
+      copyPath: "Copy path",
+      openFolder: "Open folder",
+      pathCopied: "Path copied",
+      copyFailed: "Could not copy the path",
+      openFolderFailed: "Could not open the folder",
       importFailed: "Could not read that file",
       saveFailed: "Could not save",
       fileExcel: "Excel sheet",
@@ -101,7 +107,13 @@
         [`已导入 ${count} 条`, `共 ${total} 条`, skipped ? `跳过 ${skipped} 行` : null].filter(Boolean).join("，"),
       exportFailed: "导出失败",
       savedTo: (path) => `已保存到 ${path}`,
-      savedNoPath: "已保存，但宿主未回报路径",
+      outputLabel: "输出地址",
+      choosePath: "选择…",
+      copyPath: "复制路径",
+      openFolder: "打开文件夹",
+      pathCopied: "已复制路径",
+      copyFailed: "复制路径失败",
+      openFolderFailed: "打开文件夹失败",
       importFailed: "无法读取该文件",
       saveFailed: "保存失败",
       fileExcel: "Excel 表格",
@@ -154,6 +166,12 @@
   let exportRange = $state("all");
   let exportFrom = $state("");
   let exportTo = $state("");
+  /** The absolute file the export will write, shown in the dialog and used as
+   *  given. Picking one in the save dialog replaces it wholesale. */
+  let exportPath = $state("");
+  /** Set once the user named the file themselves, which is what tells the
+   *  sidecar an existing file may be replaced. */
+  let exportChosen = $state(false);
 
   let importOpen = $state(false);
   let importFileName = $state("");
@@ -285,11 +303,6 @@
     notes = result.value?.notes ?? {};
   }
 
-  /** A `data:` URI is not a thing the user can open, so only a real path is shown. */
-  function displayPath(path) {
-    return typeof path === "string" && !path.startsWith("data:") ? path : "";
-  }
-
   function flash(message) {
     status = message;
     clearTimeout(statusTimer);
@@ -360,14 +373,25 @@
     return [keyOf(start.getFullYear(), start.getMonth(), start.getDate()), todayKey];
   }
 
-  function openExport() {
+  async function openExport() {
     menuOpen = false;
     exportType = "xls";
     exportRange = "all";
     const [from, to] = boundsFor("all");
     exportFrom = from;
     exportTo = to;
+    exportChosen = false;
     exportOpen = true;
+    // The dialog opens on a path rather than filling one in later, so the user
+    // sees where the file is going before deciding to write it.
+    await loadDestination();
+  }
+
+  /** Switching format keeps the folder and the stem, so a renamed file stays
+   *  renamed and the destination does not jump back to the default. */
+  function setExportType(type) {
+    exportType = type;
+    exportPath = replaceExtension(exportPath, type);
   }
 
   function pickRange(range) {
@@ -389,51 +413,75 @@
       .map((key) => [key, notes[key]]);
   });
 
-  /**
-   * Hands the file to the user and says where it landed.
-   *
-   * A browser download cannot be detected from inside the page: in a sandboxed
-   * frame without allow-downloads the anchor click neither throws nor delivers a
-   * file, so "try the browser, fall back on error" always believes it succeeded.
-   * The verifiable write therefore comes first — the sidecar is an ordinary
-   * process, and its reply either names a real path or fails — and the browser
-   * download becomes best effort on top of it.
-   *
-   * The destination is returned rather than flashed here: the caller owns the
-   * one status line, and two flashes in the same tick would leave only the
-   * second one visible — losing the path the user needs to find the file.
-   */
-  async function saveExport(blob, filename) {
-    const stored = await saveViaSidecar(blob, filename);
-    // Without a sidecar there is nothing to fall back to: a plain browser tab
-    // relies on the anchor, and there it works. The failure is already reported.
-    if (!stored.ok) {
-      anchorDownload(blob, filename);
-      return { ok: false, where: "" };
-    }
-
-    // A save picker lets the user choose a location, which beats a path inside the
-    // data directory, but it is best effort: the file is already stored.
-    if (typeof window.showSaveFilePicker === "function") {
-      try {
-        const handle = await window.showSaveFilePicker({ suggestedName: filename });
-        const writable = await handle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-        // The user picked the place, so naming it again would only repeat them.
-        return { ok: true, where: "" };
-      } catch (error) {
-        if (error?.name !== "AbortError") {
-          console.warn("[calendar] save picker failed; the stored copy stands:", error);
-        }
-        // Cancelling is a decision: keep reporting where the file already is.
-      }
-    }
-
-    return { ok: true, where: stored.path ? text.savedTo(stored.path) : text.savedNoPath };
+  /** The file name an export of this format would like to use. */
+  function exportFileName(type) {
+    return `calendar-notes-${todayKey}.${type}`;
   }
 
-  /** The classic route, used when there is no sidecar to write for us. */
+  /** The UI cannot join paths, and the host hands back a native one, so this
+   *  only has to supply whichever separator the folder is missing. */
+  function joinPath(directory, name) {
+    if (!directory) return name;
+    const separator = directory.includes("\\") ? "\\" : "/";
+    return directory.endsWith(separator) ? `${directory}${name}` : `${directory}${separator}${name}`;
+  }
+
+  /** Swaps the extension, keeping the folder and the stem the user may have
+   *  renamed: switching format should not move the file or rename it back. */
+  function replaceExtension(path, extension) {
+    // No destination to rewrite yet; an invented ".txt" would be worse than an
+    // empty field, which at least shows that the host never answered.
+    if (!path) return "";
+    const cut = path.lastIndexOf(".");
+    const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+    return `${cut > slash ? path.slice(0, cut) : path}.${extension}`;
+  }
+
+  /**
+   * Asks the host where an export should go: the folder the user last chose, or
+   * their downloads folder the first time.
+   */
+  async function loadDestination() {
+    const result = await invoke("dbx-calendar/export/destination");
+    const directory = result.ok ? (result.value?.directory ?? "") : "";
+    exportPath = joinPath(directory, exportFileName(exportType));
+  }
+
+  /** Opens the OS save dialog. Whatever it returns becomes the destination, so
+   *  the user can rename the file as well as move it. */
+  async function chooseExportPath() {
+    const result = await invoke("dbx-calendar/export/pick", {
+      initial: exportPath,
+      title: text.export,
+      label: exportType === "txt" ? text.fileText : text.fileExcel,
+      extension: exportType,
+    });
+    if (!result.ok) {
+      flash(`${text.exportFailed}: ${result.error}`);
+      return;
+    }
+    if (result.value?.cancelled) return;
+    const chosen = result.value?.path;
+    if (typeof chosen === "string" && chosen) {
+      exportPath = chosen;
+      // Named by hand in a dialog that already asked about replacing it, so the
+      // export writes exactly here rather than beside an existing file.
+      exportChosen = true;
+    }
+  }
+
+  async function copyExportPath() {
+    const result = await invoke("dbx-calendar/export/copy", { text: exportPath });
+    flash(result.ok ? text.pathCopied : `${text.copyFailed}: ${result.error}`);
+  }
+
+  async function revealExportPath() {
+    const result = await invoke("dbx-calendar/export/reveal", { path: exportPath });
+    if (!result.ok) flash(`${text.openFolderFailed}: ${result.error}`);
+  }
+
+  /** The browser's own download, for a page opened outside the host: there is
+   *  no sidecar to write for us there, and no sandbox to drop the click. */
   function anchorDownload(blob, filename) {
     try {
       const url = URL.createObjectURL(blob);
@@ -453,41 +501,23 @@
    * the only evidence either side of this feature can trust, which is why it is
    * attempted before any browser route.
    */
-  async function saveViaSidecar(blob, filename) {
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    // Chunked so a large workbook cannot blow the argument limit of from().
-    let binary = "";
-    for (let index = 0; index < bytes.length; index += 0x8000) {
-      binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
-    }
-
-    const result = await invoke("dbx-calendar/export/write", {
-      name: filename,
-      data: btoa(binary),
-    });
-    if (!result.ok) {
-      notesError = result.error;
-      flash(`${text.exportFailed}: ${result.error}`);
-      return { ok: false, path: "" };
-    }
-
-    notesError = "";
-    return { ok: true, path: displayPath(result.value?.path) };
-  }
-
   async function runExport() {
     const rows = exportRows;
     if (!rows.length) return;
 
     try {
-      const stem = `calendar-notes-${todayKey}`;
       let blob;
-      let filename;
       if (exportType === "txt") {
         // Named `body` rather than `text`: `text` is the copy table.
-        const body = rows.map(([key, content]) => `${key}\t${content}`).join("\n");
+        // A note may hold line breaks of its own, which would otherwise split
+        // one record across several lines and leave everything after the first
+        // without a date. They travel as the two characters `\n` instead, so
+        // every record stays exactly one line: date, tab, note. CR and CRLF are
+        // folded in too — both are "a line break here", whatever the note was
+        // pasted from.
+        const oneLine = (value) => value.replace(/\r\n?|\n/g, "\\n");
+        const body = rows.map(([key, content]) => `${key}\t${oneLine(content)}`).join("\n");
         blob = new Blob([`${body}\n`], { type: "text/plain;charset=utf-8" });
-        filename = `${stem}.txt`;
       } else {
         const sheet = XLSX.utils.aoa_to_sheet([[text.colDate, text.colContent], ...rows]);
         sheet["!cols"] = [{ wch: 12 }, { wch: 60 }];
@@ -496,16 +526,39 @@
         blob = new Blob([XLSX.write(book, { bookType: "xls", type: "array" })], {
           type: "application/vnd.ms-excel",
         });
-        filename = `${stem}.xls`;
       }
 
-      const outcome = await saveExport(blob, filename);
-      if (outcome.ok) {
+      // Outside the host there is no sidecar to write for us, and no sandbox to
+      // drop the click either — a browser tab still downloads the file.
+      if (!bridgeAvailable) {
+        anchorDownload(blob, exportFileName(exportType));
         exportOpen = false;
-        // One line, so the path survives: the count alone left the user with no
-        // way to tell that a file had been written, or where.
-        flash([text.exported(rows.length), outcome.where].filter(Boolean).join(" · "));
+        flash(text.exported(rows.length));
+        return;
       }
+
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      // Chunked so a large workbook cannot blow the argument limit of from().
+      let binary = "";
+      for (let index = 0; index < bytes.length; index += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+      }
+
+      const result = await invoke("dbx-calendar/export/write", {
+        path: exportPath,
+        data: btoa(binary),
+        overwrite: exportChosen,
+      });
+      if (!result.ok) {
+        flash(`${text.exportFailed}: ${result.error}`);
+        return;
+      }
+
+      exportOpen = false;
+      // The reply names the file that was actually written, which is not always
+      // the one asked for: a taken name gains " (2)" rather than replacing it.
+      const written = result.value?.path || exportPath;
+      flash([text.exported(rows.length), text.savedTo(written)].filter(Boolean).join(" · "));
     } catch (error) {
       flash(`${text.exportFailed}: ${error.message}`);
     }
@@ -798,7 +851,7 @@
           class:active={exportType === "xls"}
           role="radio"
           aria-checked={exportType === "xls"}
-          onclick={() => (exportType = "xls")}
+          onclick={() => setExportType("xls")}
         >
           <img src={xlsIcon} alt="" />
           <span>{text.fileExcel}</span>
@@ -809,11 +862,21 @@
           class:active={exportType === "txt"}
           role="radio"
           aria-checked={exportType === "txt"}
-          onclick={() => (exportType = "txt")}
+          onclick={() => setExportType("txt")}
         >
           <img src={txtIcon} alt="" />
           <span>{text.fileText}</span>
         </button>
+      </div>
+
+      <div class="destination">
+        <span class="destination-label">{text.outputLabel}</span>
+        <p class="destination-path" title={exportPath}>{exportPath}</p>
+        <div class="destination-actions">
+          <button type="button" class="ghost" onclick={chooseExportPath}>{text.choosePath}</button>
+          <button type="button" class="ghost" onclick={copyExportPath}>{text.copyPath}</button>
+          <button type="button" class="ghost" onclick={revealExportPath}>{text.openFolder}</button>
+        </div>
       </div>
 
       <div class="range-inputs">
@@ -1359,6 +1422,47 @@
   .type.active {
     border-color: var(--accent);
     background: color-mix(in srgb, var(--accent) 8%, Canvas);
+  }
+
+  /* The destination is the one piece of the dialog the user may need to read
+     character by character, so the path wraps rather than truncating. */
+  .destination {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .destination-label {
+    color: var(--muted);
+    font-size: 11.5px;
+  }
+  .destination-path {
+    margin: 0;
+    padding: 7px 9px;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    background: color-mix(in srgb, CanvasText 3%, Canvas);
+    font-size: 11.5px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+  }
+  .destination-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .destination-actions button {
+    height: 28px;
+    padding: 0 10px;
+    border: 1px solid var(--rule);
+    border-radius: 7px;
+    color: inherit;
+    background: transparent;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .destination-actions button:hover {
+    background: var(--tint);
   }
 
   .range-inputs {
